@@ -38,9 +38,10 @@ ANYPOINT_ENV_ID=your-environment-id
 ANYPOINT_BASE_URL=https://anypoint.mulesoft.com
 MCP_HOST=127.0.0.1
 MCP_PORT=3000
+MCP_PUBLIC_BASE_URL=https://your-ngrok-host.ngrok-free.dev
 ```
 
-`ANYPOINT_ORG_ID` is optional when `/accounts/api/profile` contains a usable organization ID. Keep it set when the profile belongs to multiple organizations and you want to pin one. `ANYPOINT_ENV_ID` is required for API Manager and Runtime Manager tools unless you pass `environmentId` to the tool. `ANYPOINT_BASE_URL` is optional and defaults to `https://anypoint.mulesoft.com`.
+`ANYPOINT_ORG_ID` is optional when `/accounts/api/profile` contains a usable organization ID. Keep it set when the profile belongs to multiple organizations and you want to pin one. `ANYPOINT_ENV_ID` is required for API Manager and Runtime Manager tools unless you pass `environmentId` to the tool. `ANYPOINT_BASE_URL` is optional and defaults to `https://anypoint.mulesoft.com`. `MCP_PUBLIC_BASE_URL` is optional; when set, tools can return normal HTTPS links for browser-rendered UI pages exposed through ngrok. Host header validation is disabled so the server can be exposed through tunnels such as ngrok without maintaining an allowlist.
 
 A local `.env` file is included with empty placeholders. It is ignored by git.
 
@@ -108,6 +109,14 @@ The health endpoint is:
 ```text
 http://127.0.0.1:3000/health
 ```
+
+The API Designer projects UI is also available as a browser-rendered page:
+
+```text
+http://127.0.0.1:3000/ui/api-designer/projects
+```
+
+When `MCP_PUBLIC_BASE_URL` is set, `api_designer_list_projects` includes the public HTTPS UI URL in its tool result. The same tool is registered with the MCP-UI/MCP Apps pattern from `@mcp-ui/server` and `@modelcontextprotocol/ext-apps`: `registerAppTool` advertises `_meta.ui.resourceUri` and the legacy `_meta["ui/resourceUri"]` key, both pointing to `ui://anypoint-api-designer/projects`, while `registerAppResource` serves a `createUIResource` HTML resource with MIME type `text/html;profile=mcp-app`. Apps-capable hosts such as Agentik should fetch that resource with `resources/read` and render it.
 
 Inspect with MCP Inspector:
 

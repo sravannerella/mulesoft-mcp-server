@@ -1,8 +1,12 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { registerAppResource, registerAppTool } from "@modelcontextprotocol/ext-apps/server";
+import { createUIResource } from "@mcp-ui/server";
+import type { UIResource } from "@mcp-ui/server";
 import { z } from "zod/v4";
 import { anypointRequest, encodePathSegment } from "../shared/anypointClient.js";
 import { toolResult } from "../shared/mcpResponse.js";
 import type { AnypointModule } from "../shared/types.js";
+import { renderDesignCenterProjectsUI } from "../ui/designCenterUiRenderer.js";
 import { registerEndpointResource } from "./resources.js";
 
 type SaveFile = {
@@ -10,6 +14,18 @@ type SaveFile = {
   type: "FILE" | "FOLDER";
   content?: string;
   title?: string;
+};
+
+type DesignCenterProject = {
+  id?: string;
+  name?: string;
+  classifier?: string;
+  type?: string;
+  createdDate?: string | number;
+  lastUpdatedDate?: string | number;
+  updatedDate?: string | number;
+  deleted?: boolean;
+  [key: string]: unknown;
 };
 
 const apiDesignerModule: AnypointModule = {
@@ -56,17 +72,155 @@ const filePathInput = {
   path: z.string().min(1).describe("File or folder path inside the branch, for example api.raml."),
 };
 
+const PROJECTS_UI_URI = "ui://anypoint-api-designer/projects" as const;
+
+const projectsUiResource = {
+  uri: PROJECTS_UI_URI,
+  name: "Design Center Projects",
+  description: "Visual HTML view of API Designer projects.",
+};
+
+const projectsUiCsp = {
+  connectDomains: [],
+  resourceDomains: ["https://fonts.googleapis.com", "https://fonts.gstatic.com"],
+  frameDomains: [],
+  baseUriDomains: [],
+};
+
+export async function renderApiDesignerProjectsHtml(): Promise<string> {
+  return renderDesignCenterProjectsUI(await anypointRequest(projectPath()));
+}
+
+async function createProjectsUiResource(): Promise<UIResource> {
+  return createUIResource({
+    uri: PROJECTS_UI_URI,
+    content: {
+      type: "rawHtml",
+      htmlString: await renderApiDesignerProjectsHtml(),
+    },
+    encoding: "text",
+    metadata: {
+      title: projectsUiResource.name,
+      description: projectsUiResource.description,
+      "mcpui.dev/ui-connect-domains": projectsUiCsp.connectDomains,
+      "mcpui.dev/ui-resource-domains": projectsUiCsp.resourceDomains,
+      "mcpui.dev/ui-frame-domains": projectsUiCsp.frameDomains,
+      "mcpui.dev/ui-baseUri-domains": projectsUiCsp.baseUriDomains,
+    },
+    uiMetadata: {
+      "preferred-frame-size": ["900px", "640px"],
+    },
+  });
+}
+
+function publicProjectsUiUrl(): string | undefined {
+  const baseUrl = process.env.MCP_PUBLIC_BASE_URL ?? process.env.PUBLIC_BASE_URL;
+  if (!baseUrl) {
+    return undefined;
+  }
+
+  return `${baseUrl.replace(/\/+$/, "")}/ui/api-designer/projects`;
+}
+
+function normalizeProjects(data: unknown): DesignCenterProject[] {
+  if (Array.isArray(data)) {
+    return data as DesignCenterProject[];
+  }
+
+  if (data && typeof data === "object") {
+    const record = data as Record<string, unknown>;
+    for (const key of ["projects", "items", "data", "results"]) {
+      if (Array.isArray(record[key])) {
+        return record[key] as DesignCenterProject[];
+      }
+    }
+  }
+
+  return [];
+}
+
+function projectSummary(data: unknown, publicUrl: string | undefined) {
+  const projects = normalizeProjects(data);
+  const activeProjects = projects.filter((project) => project.deleted !== true);
+  const names = activeProjects.map((project) => project.name ?? project.id ?? "Untitled Project");
+  const summary = [
+    `Design Center has ${activeProjects.length} active project${activeProjects.length === 1 ? "" : "s"}.`,
+    names.length > 0 ? `Projects: ${names.join(", ")}.` : undefined,
+    publicUrl ? `Visual view: ${publicUrl}` : undefined,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: summary,
+      },
+    ],
+    structuredContent: {
+      count: activeProjects.length,
+      projects: activeProjects.map((project) => ({
+        id: project.id,
+        name: project.name,
+        type: project.type ?? project.classifier,
+        createdDate: project.createdDate,
+        updatedDate: project.updatedDate ?? project.lastUpdatedDate,
+      })),
+      visualViewUrl: publicUrl,
+    },
+  };
+}
+
 export function registerApiDesignerTools(server: McpServer): void {
   registerEndpointResource(server, apiDesignerModule);
 
-  server.registerTool(
+  registerAppResource(
+    server,
+    projectsUiResource.name,
+    PROJECTS_UI_URI,
+    {
+      description: "Visual HTML view of API Designer projects. Renders as a carousel for fewer than 5 projects, or a table for 5 or more.",
+      _meta: {
+        ui: {
+          csp: projectsUiCsp,
+        },
+      },
+    },
+    async () => {
+      const uiResource = await createProjectsUiResource();
+      return {
+        contents: [
+          {
+            ...uiResource.resource,
+            _meta: {
+              ...uiResource.resource._meta,
+              ui: {
+                csp: projectsUiCsp,
+              },
+            },
+          },
+        ],
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
     "api_designer_list_projects",
     {
       title: "List API Designer projects",
       description: "List API Designer projects the configured user can access.",
       annotations: { readOnlyHint: true },
+      _meta: {
+        ui: { resourceUri: PROJECTS_UI_URI },
+      },
     },
-    async () => toolResult(await anypointRequest(projectPath())),
+    async () => {
+      const data = await anypointRequest(projectPath());
+      const publicUrl = publicProjectsUiUrl();
+      return projectSummary(data, publicUrl);
+    },
   );
 
   server.registerTool(

@@ -2,9 +2,10 @@
 
 import "dotenv/config";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import express from "express";
 import type { Request, Response } from "express";
+import { renderApiDesignerProjectsHtml } from "./modules/apiDesigner.js";
 import { registerModules } from "./modules/index.js";
 import { initializeAnypointAuth } from "./shared/anypointClient.js";
 
@@ -37,7 +38,8 @@ async function main() {
 
   const host = httpHost();
   const port = httpPort();
-  const app = createMcpExpressApp({ host });
+  const app = express();
+  app.use(express.json());
 
   app.post("/mcp", async (req: Request, res: Response) => {
     const server = createServer();
@@ -70,6 +72,15 @@ async function main() {
 
   app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok" });
+  });
+
+  app.get("/ui/api-designer/projects", async (_req: Request, res: Response) => {
+    try {
+      res.type("html").send(await renderApiDesignerProjectsHtml());
+    } catch (error) {
+      console.error("Error rendering API Designer projects UI:", error);
+      res.status(500).send("Unable to render API Designer projects UI.");
+    }
   });
 
   app.get("/mcp", (_req: Request, res: Response) => {
