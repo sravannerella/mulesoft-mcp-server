@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<!--
+  Design Center projects carousel — static HTML resource aligned with designCenterUiRenderer.ts
+
+  Use with MuleSoft / MCP hosts:
+  - Replace the sample cards inside <div class="carousel-track" id="track"> with server-rendered
+    markup matching buildCard() in designCenterUiRenderer.ts (escape text in HTML attributes and body).
+  - Or serve this file next to assets/MuleyUp.png so the relative icon path resolves.
+  - Anypoint project URL pattern:
+    {anypointBaseUrl}/designcenter/api-designer/#/projects/{projectId}?organizationId={orgId}
+  - Optional: postMessage parent integration (MCP-UI iframe lifecycle) is included at bottom of body.
+
+  CSP hints (match apiDesigner.ts projectsUiCsp when registering the resource):
+  - resourceDomains: https://fonts.googleapis.com, https://fonts.gstatic.com
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400..800;1,400..800&family=Google+Sans:ital,opsz,wght@0,17..18,400..700;1,17..18,400..700&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Google Sans', 'EB Garamond', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    body {
+      background: #faf8f3;
+      color: #242424;
+      padding: 16px;
+      overflow-x: hidden;
+    }
+    .dc-shell {
+      width: 100%;
+      margin: 0;
+    }
+    .carousel-wrapper {
+      position: relative;
+      width: 100%;
+    }
+    .carousel-track-outer {
+      overflow-x: auto;
+      overflow-y: hidden;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: thin;
+      scrollbar-color: #cfcfca transparent;
+      padding-bottom: 10px;
+    }
+    .carousel-track {
+      display: flex;
+      gap: 14px;
+      padding: 0 2px 4px;
+      width: max-content;
+    }
+    .dc-card {
+      flex: 0 0 226px;
+      height: 160px;
+      background: #fff;
+      border: 1px solid rgba(255,255,255,0.9);
+      border-radius: 18px;
+      overflow: hidden;
+      color: inherit;
+      text-decoration: none;
+      box-shadow: 0 10px 22px rgba(32,32,32,0.08);
+      display: flex;
+      flex-direction: column;
+      transition: transform 0.18s ease, box-shadow 0.18s ease;
+    }
+    .dc-card:hover,
+    .dc-card:focus-visible {
+      transform: translateY(-2px);
+      box-shadow: 0 14px 28px rgba(32,32,32,0.12);
+      outline: none;
+    }
+    .dc-card-visual {
+      height: 46px;
+      background: transparent;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px 0;
+    }
+    .dc-card-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 11px;
+      background: #ffffff;
+      object-fit: contain;
+      padding: 3px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.12);
+    }
+    .dc-badge {
+      color: #65645d;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+    .dc-card-body {
+      padding: 7px 18px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex: 1;
+    }
+    .dc-kicker {
+      color: #56554f;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+    .dc-card-title {
+      color: #242424;
+      font-size: 18px;
+      line-height: 1.12;
+      font-weight: 800;
+      min-height: 40px;
+      overflow-wrap: anywhere;
+    }
+    .dc-card-meta {
+      display: flex;
+      align-items: center;
+      font-family: 'EB Garamond', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      gap: 7px;
+      color: #8a8984;
+      font-size: 13px;
+      font-weight: 700;
+      margin-top: auto;
+      white-space: nowrap;
+    }
+    .dc-dot {
+      width: 3px;
+      height: 3px;
+      border-radius: 50%;
+      background: #b5b4ae;
+      flex: 0 0 auto;
+    }
+    .dc-empty {
+      background: #fff;
+      border-radius: 16px;
+      padding: 20px;
+      color: #65645d;
+      font-size: 13px;
+    }
+    @media (max-width: 520px) {
+      body { padding: 12px; }
+      .dc-card { flex-basis: 206px; height: 154px; }
+      .dc-card-title { font-size: 17px; }
+      .dc-card-meta { font-size: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="dc-shell">
+    <div class="carousel-wrapper">
+      <div class="carousel-track-outer">
+        <div class="carousel-track" id="track">
+          <!-- Sample cards (remove and replace with dynamic content) -->
+          <a class="dc-card" href="https://anypoint.mulesoft.com/designcenter/api-designer/#/projects/sample-project-id?organizationId=sample-org-id" target="_blank" rel="noopener noreferrer" aria-label="Open Sample RAML API in Design Center">
+            <div class="dc-card-visual">
+              <img class="dc-card-icon" src="./assets/MuleyUp.png" alt="">
+              <span class="dc-badge">RAML</span>
+            </div>
+            <div class="dc-card-body">
+              <div class="dc-kicker">Design Center</div>
+              <div class="dc-card-title">Sample RAML API</div>
+              <div class="dc-card-meta">
+                <span>Jan 15, 2026</span>
+              </div>
+            </div>
+          </a>
+          <a class="dc-card" href="https://anypoint.mulesoft.com/designcenter/api-designer/#/projects/sample-oas-id?organizationId=sample-org-id" target="_blank" rel="noopener noreferrer" aria-label="Open Customer OAS in Design Center">
+            <div class="dc-card-visual">
+              <img class="dc-card-icon" src="./assets/MuleyUp.png" alt="">
+              <span class="dc-badge">OAS</span>
+            </div>
+            <div class="dc-card-body">
+              <div class="dc-kicker">Design Center</div>
+              <div class="dc-card-title">Customer Orders API</div>
+              <div class="dc-card-meta">
+                <span>May 1, 2026</span>
+              </div>
+            </div>
+          </a>
+        </div>
+      </div>
+    </div>
+  </main>
+  <script>
+    window.addEventListener('message', function(event) {
+      if (event.data && event.data.type === 'ui-lifecycle-iframe-render-data') {
+        window.__mcpUiRenderData = event.data.payload && event.data.payload.renderData;
+      }
+    });
+    window.parent.postMessage({ type: 'ui-lifecycle-iframe-ready' }, '*');
+  </script>
+</body>
+</html>

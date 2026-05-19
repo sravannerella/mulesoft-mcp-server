@@ -95,8 +95,7 @@ const SHARED_STYLES = `
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Google Sans', 'EB Garamond', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
     body {
-      min-height: 100vh;
-      background: #eeeee9;
+      background: #faf8f3;
       color: #242424;
       padding: 16px;
       overflow-x: hidden;
