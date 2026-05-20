@@ -212,7 +212,7 @@ export function registerRuntimeManagerTools(server: McpServer): void {
     {
       title: "Runtime Manager: List Deployments",
       description:
-        "List Runtime Manager application deployments. " +
+        "List Runtime Manager applications and their deployment statuses. " +
         "When neither environmentId nor environmentName is provided, deployments from ALL environments are fetched in parallel and combined. " +
         "Provide environmentName (e.g. \"Production\") to scope to one environment by name, or environmentId for an exact match. " +
         "Returns an interactive UI with status badges, CloudHub URLs, Exchange links, and scheduler details. " +
