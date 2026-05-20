@@ -1,10 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { registerAppResource, registerAppTool } from "@modelcontextprotocol/ext-apps/server";
+import { createUIResource } from "@mcp-ui/server";
 import { z } from "zod/v4";
 import { anypointRequest, cachedProfile, encodePathSegment, organizationId } from "../shared/anypointClient.js";
 import { MemoryCache } from "../shared/memoryCache.js";
-import { toolResult } from "../shared/mcpResponse.js";
-import { optionalOrgId } from "../shared/schemas.js";
 import type { AnypointModule } from "../shared/types.js";
+import { renderAccountsContextHtml } from "../ui/accountsUiRenderer.js";
 import { registerEndpointResource } from "./resources.js";
 
 const accountsModule: AnypointModule = {
@@ -15,89 +16,95 @@ const accountsModule: AnypointModule = {
   endpoints: [
     "GET /accounts/api/profile",
     "GET /accounts/api/organizations/{organizationId}/environments",
-    "GET /accounts/api/organizations/{organizationId}/environments/{environmentId}",
   ],
 };
 
+const ACCOUNTS_CONTEXT_URI = "ui://anypoint/accounts-context" as const;
+
 const environmentsByOrgCache = new MemoryCache<unknown>();
-const environmentByOrgAndIdCache = new MemoryCache<unknown>();
 
 function environmentsPath(orgId: string): string {
   return `/accounts/api/organizations/${encodePathSegment(orgId)}/environments`;
 }
 
-function environmentPath(orgId: string, envId: string): string {
-  return `${environmentsPath(orgId)}/${encodePathSegment(envId)}`;
-}
-
-function environmentCacheKey(orgId: string, envId: string): string {
-  return `${orgId}:${envId}`;
+async function fetchContextHtml(): Promise<string> {
+  const profile = await cachedProfile(false);
+  const orgId = organizationId();
+  const cached = environmentsByOrgCache.get(orgId);
+  const environments = cached
+    ? cached.value
+    : await anypointRequest(environmentsPath(orgId)).then((data) => {
+        environmentsByOrgCache.set(orgId, data);
+        return data;
+      });
+  return renderAccountsContextHtml(profile, environments);
 }
 
 export function registerAccountsTools(server: McpServer): void {
   registerEndpointResource(server, accountsModule);
 
-  server.registerTool(
-    "accounts_get_profile",
-    {
-      title: "Get Anypoint profile",
-      description: "Return the cached Anypoint profile. Set refresh to true to reload it from Anypoint.",
-      inputSchema: {
-        refresh: z.boolean().default(false).describe("Fetch from Anypoint even when cached."),
-      },
-      annotations: { readOnlyHint: true },
+  registerAppResource(
+    server,
+    "Anypoint Context",
+    ACCOUNTS_CONTEXT_URI,
+    { description: "Visual view of Anypoint user profile and environments." },
+    async () => {
+      const html = await fetchContextHtml();
+      const resource = createUIResource({
+        uri: ACCOUNTS_CONTEXT_URI,
+        content: { type: "rawHtml", htmlString: html },
+        encoding: "text",
+      });
+      return { contents: [resource.resource] };
     },
-    async ({ refresh }) => toolResult(await cachedProfile(refresh)),
   );
 
-  server.registerTool(
-    "accounts_list_environments",
+  registerAppTool(
+    server,
+    "accounts_context",
     {
-      title: "List Anypoint environments",
-      description: "Retrieve and cache environments for an Anypoint organization.",
+      title: "Get Anypoint context (profile + environments)",
+      description:
+        "Returns the current Anypoint user profile and the list of environments for the organization. " +
+        "Use the returned organizationId and environment IDs with other tools. " +
+        "Set refresh to true to bypass the in-process cache.",
       inputSchema: {
-        ...optionalOrgId,
         refresh: z.boolean().default(false).describe("Fetch from Anypoint even when cached."),
       },
       annotations: { readOnlyHint: true },
+      _meta: { ui: { resourceUri: ACCOUNTS_CONTEXT_URI } },
     },
-    async ({ organizationId: orgOverride, refresh }) => {
-      const orgId = organizationId(orgOverride);
+    async ({ refresh }) => {
+      const profile = await cachedProfile(refresh);
+      const orgId = organizationId();
       const cached = environmentsByOrgCache.get(orgId);
+      let environments: unknown;
       if (!refresh && cached) {
-        return toolResult(cached.value);
+        environments = cached.value;
+      } else {
+        environments = await anypointRequest(environmentsPath(orgId));
+        environmentsByOrgCache.set(orgId, environments);
       }
 
-      const environments = await anypointRequest(environmentsPath(orgId));
-      environmentsByOrgCache.set(orgId, environments);
-      return toolResult(environments);
-    },
-  );
+      const envList = Array.isArray(environments)
+        ? environments
+        : Array.isArray((environments as Record<string, unknown>)?.data)
+          ? ((environments as Record<string, unknown>).data as unknown[])
+          : [];
 
-  server.registerTool(
-    "accounts_get_environment",
-    {
-      title: "Get Anypoint environment",
-      description: "Retrieve and cache one Anypoint environment by ID.",
-      inputSchema: {
-        ...optionalOrgId,
-        environmentId: z.string().min(1),
-        refresh: z.boolean().default(false).describe("Fetch from Anypoint even when cached."),
-      },
-      annotations: { readOnlyHint: true },
-    },
-    async ({ organizationId: orgOverride, environmentId, refresh }) => {
-      const orgId = organizationId(orgOverride);
-      const cacheKey = environmentCacheKey(orgId, environmentId);
-      const cached = environmentByOrgAndIdCache.get(cacheKey);
-
-      if (!refresh && cached) {
-        return toolResult(cached.value);
-      }
-
-      const environment = await anypointRequest(environmentPath(orgId, environmentId));
-      environmentByOrgAndIdCache.set(cacheKey, environment);
-      return toolResult(environment);
+      const p = profile as Record<string, unknown>;
+      const org = p?.organization as Record<string, unknown> | undefined;
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text:
+              `User: ${String(p?.username ?? p?.email ?? "—")} | ` +
+              `Org: ${String(org?.name ?? "—")} (${orgId}) | ` +
+              `Environments: ${envList.length}`,
+          },
+        ],
+      };
     },
   );
 }

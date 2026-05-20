@@ -1,0 +1,7 @@
+<!-- profile-illustration.svg -->
+<svg width="180" height="140" viewBox="0 0 180 140" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M110 20L140 35L145 95C145 120 120 130 95 120L75 112C58 105 50 90 58 70L70 35L110 20Z" fill="#E9A07C"/>
+  <circle cx="100" cy="58" r="16" stroke="#222222" stroke-width="4"/>
+  <path d="M75 108C78 88 88 82 100 82C112 82 122 88 125 108" stroke="#222222" stroke-width="5" stroke-linecap="round"/>
+  <path d="M36 48L40 56M44 52L32 52M132 8L140 20M148 10L144 24" stroke="#222222" stroke-width="3" stroke-linecap="round"/>
+</svg>

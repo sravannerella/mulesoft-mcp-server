@@ -1,0 +1,5 @@
+<!-- env-sandbox.svg -->
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <path d="M9 6H15" stroke="#222222" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M10 6V9L6 17C5 19 6 20 8 20H16C18 20 19 19 18 17L14 9V6" stroke="#222222" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

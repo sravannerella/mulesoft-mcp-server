@@ -1,0 +1,11 @@
+<!-- fingerprint.svg -->
+<svg width="28" height="28" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="28" height="28" rx="8" fill="#F4E8DB"/>
+  <path d="M14 7C11 7 9 9 9 12" stroke="#222222" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M14 7C17 7 19 9 19 12" stroke="#222222" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M11 13V15" stroke="#222222" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M14 11V18" stroke="#222222" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M17 13V16" stroke="#222222" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M10 18C10 20 11 21 12 22" stroke="#222222" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M18 18C18 20 17 21 16 22" stroke="#222222" stroke-width="1.8" stroke-linecap="round"/>
+</svg>

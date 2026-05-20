@@ -1,350 +1,454 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { registerAppResource, registerAppTool } from "@modelcontextprotocol/ext-apps/server";
+import { createUIResource } from "@mcp-ui/server";
 import { z } from "zod/v4";
-import { anypointRequest, encodePathSegment, environmentId, organizationId } from "../shared/anypointClient.js";
+import { anypointBaseUrl, anypointRequest, encodePathSegment, environmentId, getAccessToken, organizationId } from "../shared/anypointClient.js";
 import { toolResult } from "../shared/mcpResponse.js";
-import { asJsonValue, optionalEnvId, optionalOrgId, rawRequestInput } from "../shared/schemas.js";
-import type { AnypointModule, JsonValue } from "../shared/types.js";
-import { assertPathPrefix, registerEndpointResource } from "./resources.js";
 
-const runtimeModule: AnypointModule = {
-  name: "runtime-manager",
-  displayName: "AMC Application Manager API",
-  resourceUri: "anypoint-runtime-manager://endpoints",
-  docsUrl: "https://dev-portal.mulesoft.com/apis/amc-application-manager.html",
-  endpoints: [
-    "GET /amc/application-manager/api/v2/organizations/{organizationId}/environments/{environmentId}/deployments",
-    "POST /amc/application-manager/api/v2/organizations/{organizationId}/environments/{environmentId}/deployments",
-    "GET /amc/application-manager/api/v2/organizations/{organizationId}/environments/{environmentId}/deployments/{deploymentId}",
-    "PATCH /amc/application-manager/api/v2/organizations/{organizationId}/environments/{environmentId}/deployments/{deploymentId}",
-    "DELETE /amc/application-manager/api/v2/organizations/{organizationId}/environments/{environmentId}/deployments/{deploymentId}",
-    "PATCH /amc/application-manager/api/v2/organizations/{organizationId}/environments/{environmentId}/deployments/{deploymentId} { application.desiredState: STARTED }",
-    "PATCH /amc/application-manager/api/v2/organizations/{organizationId}/environments/{environmentId}/deployments/{deploymentId} { application.desiredState: STOPPED }",
-    "GET /amc/application-manager/api/v2/organizations/{organizationId}/environments/{environmentId}/deployments/{deploymentId}/specs",
-    "GET /amc/application-manager/api/v2/organizations/{organizationId}/environments/{environmentId}/deployments/{deploymentId}/specs/{specId}/logs",
-  ],
-};
+const RUNTIME_DEPLOYMENTS_URI = "ui://anypoint-runtime-manager/deployments" as const;
+import { optionalEnvId, optionalOrgId } from "../shared/schemas.js";
+import { advancedToolsEnabled, requireAdvancedTools } from "../shared/workflowGuards.js";
+import type { JsonValue } from "../shared/types.js";
+import { renderRuntimeManagerDeploymentsHtml } from "../ui/runtimeManagerUiRenderer.js";
 
-function runtimeBase(orgId: string, envId: string): string {
-  return `/amc/application-manager/api/v2/organizations/${encodePathSegment(orgId)}/environments/${encodePathSegment(envId)}`;
+// ─── Path helpers ─────────────────────────────────────────────────────────────
+
+function deploymentsBase(orgId: string, envId: string): string {
+  return `/amc/application-manager/api/v2/organizations/${encodePathSegment(orgId)}/environments/${encodePathSegment(envId)}/deployments`;
 }
 
-function deploymentsPath(orgId: string, envId: string): string {
-  return `${runtimeBase(orgId, envId)}/deployments`;
+function deploymentPath(orgId: string, envId: string, id: string): string {
+  return `${deploymentsBase(orgId, envId)}/${encodePathSegment(id)}`;
 }
 
-function deploymentPath(orgId: string, envId: string, deploymentId: string): string {
-  return `${deploymentsPath(orgId, envId)}/${encodePathSegment(deploymentId)}`;
+function specsPath(orgId: string, envId: string, id: string): string {
+  return `${deploymentPath(orgId, envId, id)}/specs`;
 }
 
-function deploymentSpecsPath(orgId: string, envId: string, deploymentId: string): string {
-  return `${deploymentPath(orgId, envId, deploymentId)}/specs`;
+function logsPath(orgId: string, envId: string, id: string, specId: string): string {
+  return `${specsPath(orgId, envId, id)}/${encodePathSegment(specId)}/logs`;
 }
 
-function deploymentLogsPath(orgId: string, envId: string, deploymentId: string, specId: string): string {
-  return `${deploymentSpecsPath(orgId, envId, deploymentId)}/${encodePathSegment(specId)}/logs`;
+function schedulersPath(orgId: string, envId: string, id: string): string {
+  return `${deploymentPath(orgId, envId, id)}/schedulers`;
 }
 
-const runtimeScopeInput = {
+function environmentsPath(orgId: string): string {
+  return `/accounts/api/organizations/${encodePathSegment(orgId)}/environments`;
+}
+
+// ─── Scope input ──────────────────────────────────────────────────────────────
+
+const scopeInput = {
   ...optionalOrgId,
   ...optionalEnvId,
 };
 
+// Input for the list tool: env can be specified by ID, by name, or omitted (→ all envs)
+const listScopeInput = {
+  ...optionalOrgId,
+  environmentId: z.string().optional().describe(
+    "Specific environment ID. When omitted, deployments from all environments are fetched.",
+  ),
+  environmentName: z.string().optional().describe(
+    "Environment name (case-insensitive). Resolved to an ID automatically. Ignored when environmentId is provided.",
+  ),
+};
+
 const deploymentInput = {
-  ...runtimeScopeInput,
-  deploymentId: z.string().min(1),
+  ...scopeInput,
+  deploymentId: z.string().min(1).describe("Runtime Manager deployment ID. Obtain from runtime_list_deployments."),
 };
 
-const runtimeLogsInput = {
-  ...deploymentInput,
-  specId: z.string().min(1).optional().describe("Deployment spec ID. When omitted, the first deployment spec is used."),
-  size: z.number().int().positive().max(500).default(100),
-  offset: z.number().int().nonnegative().default(0),
-  descending: z.boolean().default(true),
-  startTime: z.string().min(1).optional(),
-  endTime: z.string().min(1).optional(),
-};
+// ─── Internal helpers ─────────────────────────────────────────────────────────
 
-function candidateSpecId(value: unknown): string | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return undefined;
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+interface EnvironmentInfo {
+  id: string;
+  name: string;
+  type: string;
+}
+
+async function fetchEnvironments(orgId: string): Promise<EnvironmentInfo[]> {
+  const raw = await anypointRequest(environmentsPath(orgId));
+  const list = Array.isArray(raw)
+    ? raw
+    : isRecord(raw) && Array.isArray(raw.data)
+      ? raw.data
+      : [];
+  return (list as unknown[])
+    .filter(isRecord)
+    .map((e) => ({
+      id: String(e["id"] ?? ""),
+      name: String(e["name"] ?? e["id"] ?? ""),
+      type: String(e["type"] ?? ""),
+    }))
+    .filter((e) => e.id.length > 0);
+}
+
+async function fetchDeploymentsForEnv(
+  orgId: string,
+  envId: string,
+  envName: string,
+  envType: string,
+  opts: { targetId?: string; limit: number; offset: number; includeSchedulers: boolean },
+): Promise<unknown[]> {
+  try {
+    const raw = await anypointRequest(deploymentsBase(orgId, envId), {
+      query: { targetId: opts.targetId, limit: opts.limit, offset: opts.offset },
+    });
+    const items: unknown[] = Array.isArray(raw)
+      ? raw
+      : isRecord(raw) && Array.isArray(raw.items)
+        ? raw.items
+        : [];
+    const enriched = opts.includeSchedulers
+      ? await enrichWithSchedulers(orgId, envId, items)
+      : items;
+    // Tag each deployment with environment info for grouping in the UI
+    return enriched.map((d) =>
+      isRecord(d) ? { ...d, _environmentId: envId, _environmentName: envName, _environmentType: envType } : d,
+    );
+  } catch {
+    return [];
   }
-
-  const record = value as Record<string, unknown>;
-  const id = record.id ?? record.version ?? record.specId;
-  return typeof id === "string" && id.length > 0 ? id : undefined;
 }
 
 function firstSpecId(specsResponse: unknown): string {
-  let specs: unknown[] | undefined;
+  const list = Array.isArray(specsResponse)
+    ? specsResponse
+    : isRecord(specsResponse) && Array.isArray(specsResponse.items)
+      ? specsResponse.items
+      : [];
 
-  if (Array.isArray(specsResponse)) {
-    specs = specsResponse;
-  } else if (typeof specsResponse === "object" && specsResponse !== null) {
-    const items = (specsResponse as Record<string, unknown>).items;
-    if (Array.isArray(items)) {
-      specs = items;
-    }
+  for (const spec of list) {
+    if (!isRecord(spec)) continue;
+    const id = spec.id ?? spec.version ?? spec.specId;
+    if (typeof id === "string" && id.length > 0) return id;
   }
-
-  if (!specs) {
-    throw new Error("Unable to resolve Runtime Manager deployment spec: specs response was not a list");
-  }
-
-  for (const spec of specs) {
-    const id = candidateSpecId(spec);
-    if (id) {
-      return id;
-    }
-  }
-
-  throw new Error("Unable to resolve Runtime Manager deployment spec: no spec id was found");
+  throw new Error("No spec ID found in deployment specs response.");
 }
 
-async function fetchRuntimeLogs(
-  orgOverride: string | undefined,
-  envOverride: string | undefined,
-  deploymentId: string,
-  specOverride: string | undefined,
-  query: {
-    size: number;
-    offset: number;
-    descending: boolean;
-    startTime?: string;
-    endTime?: string;
-  },
-) {
-  const orgId = organizationId(orgOverride);
-  const envId = environmentId(envOverride);
-  const specId = specOverride ?? firstSpecId(await anypointRequest(deploymentSpecsPath(orgId, envId, deploymentId)));
-
-  return toolResult({
-    deploymentId,
-    specId,
-    logs: await anypointRequest(deploymentLogsPath(orgId, envId, deploymentId, specId), {
-      query,
-    }),
+async function patchDesiredState(
+  orgId: string,
+  envId: string,
+  id: string,
+  desiredState: "STARTED" | "STOPPED",
+): Promise<unknown> {
+  return anypointRequest(deploymentPath(orgId, envId, id), {
+    method: "PATCH",
+    body: { application: { desiredState } },
   });
 }
 
-async function runDeploymentAction(
-  action: "start" | "stop" | "restart",
-  orgOverride: string | undefined,
-  envOverride: string | undefined,
-  deploymentId: string,
-) {
-  const orgId = organizationId(orgOverride);
-  const envId = environmentId(envOverride);
-  const path = deploymentPath(orgId, envId, deploymentId);
-  const patchDesiredState = (desiredState: "STARTED" | "STOPPED") =>
-    anypointRequest(path, {
-      method: "PATCH",
-      body: {
-        application: {
-          desiredState,
-        },
-      },
-    });
-
-  if (action === "restart") {
-    const stopResult = await patchDesiredState("STOPPED");
-    const startResult = await patchDesiredState("STARTED");
-    return toolResult({
-      stopResult,
-      startResult,
-    });
-  }
-
-  return toolResult(
-    await patchDesiredState(action === "start" ? "STARTED" : "STOPPED"),
-  );
-}
-
-async function patchDeployment(
-  orgOverride: string | undefined,
-  envOverride: string | undefined,
-  deploymentId: string,
-  body: JsonValue,
-) {
-  return toolResult(
-    await anypointRequest(deploymentPath(organizationId(orgOverride), environmentId(envOverride), deploymentId), {
-      method: "PATCH",
-      body,
+async function enrichWithSchedulers(
+  orgId: string,
+  envId: string,
+  deployments: unknown[],
+): Promise<unknown[]> {
+  return Promise.all(
+    deployments.map(async (d) => {
+      if (!isRecord(d)) return d;
+      const depId = typeof d.id === "string" ? d.id : undefined;
+      if (!depId) return { ...d, schedulers: [] };
+      try {
+        const raw = await anypointRequest(schedulersPath(orgId, envId, depId));
+        const schedulers = Array.isArray(raw)
+          ? raw
+          : isRecord(raw) && Array.isArray(raw.data)
+            ? raw.data
+            : [];
+        return { ...d, schedulers };
+      } catch {
+        return { ...d, schedulers: [] };
+      }
     }),
   );
 }
 
-export function registerRuntimeManagerTools(server: McpServer): void {
-  registerEndpointResource(server, runtimeModule);
+// ─── Tool registration ────────────────────────────────────────────────────────
 
-  server.registerTool(
+export function registerRuntimeManagerTools(server: McpServer): void {
+  // ── Discovery ──────────────────────────────────────────────────────────────────────────────────
+
+  registerAppResource(
+    server,
+    "Runtime Manager Deployments",
+    RUNTIME_DEPLOYMENTS_URI,
+    { description: "Visual status dashboard of Runtime Manager application deployments across all environments." },
+    async () => {
+      const orgId = organizationId();
+      const envs = await fetchEnvironments(orgId);
+      const perEnvResults = await Promise.all(
+        envs.map((env) =>
+          fetchDeploymentsForEnv(orgId, env.id, env.name, env.type, {
+            limit: 50,
+            offset: 0,
+            includeSchedulers: true,
+          }),
+        ),
+      );
+      const allDeployments = perEnvResults.flat();
+      const html = renderRuntimeManagerDeploymentsHtml(allDeployments, {
+        token: await getAccessToken(),
+        baseUrl: anypointBaseUrl(),
+        orgId,
+      });
+      const resource = createUIResource({
+        uri: RUNTIME_DEPLOYMENTS_URI,
+        content: { type: "rawHtml", htmlString: html },
+        encoding: "text",
+      });
+      return { contents: [resource.resource] };
+    },
+  );
+
+  registerAppTool(
+    server,
     "runtime_list_deployments",
     {
-      title: "List runtime deployments",
-      description: "List Runtime Manager application deployments in an environment.",
+      title: "Runtime Manager: List Deployments",
+      description:
+        "List Runtime Manager application deployments. " +
+        "When neither environmentId nor environmentName is provided, deployments from ALL environments are fetched in parallel and combined. " +
+        "Provide environmentName (e.g. \"Production\") to scope to one environment by name, or environmentId for an exact match. " +
+        "Returns an interactive UI with status badges, CloudHub URLs, Exchange links, and scheduler details. " +
+        "Use deploymentId values from this result with action tools.",
       inputSchema: {
-        ...runtimeScopeInput,
-        targetId: z.string().optional(),
-        limit: z.number().int().positive().optional(),
-        offset: z.number().int().nonnegative().optional(),
+        ...listScopeInput,
+        targetId: z.string().optional().describe("Filter by target ID (CloudHub 2.0 or RTF target)."),
+        limit: z.number().int().positive().max(200).default(50),
+        offset: z.number().int().nonnegative().default(0),
+        includeSchedulers: z.boolean().default(true).describe("Fetch scheduler details per deployment (one extra API call per deployment)."),
       },
       annotations: { readOnlyHint: true },
+      _meta: { ui: { resourceUri: RUNTIME_DEPLOYMENTS_URI } },
     },
-    async ({ organizationId: orgOverride, environmentId: envOverride, targetId, limit, offset }) =>
-      toolResult(await anypointRequest(deploymentsPath(organizationId(orgOverride), environmentId(envOverride)), { query: { targetId, limit, offset } })),
+    async ({ organizationId: orgOverride, environmentId: envOverride, environmentName, targetId, limit, offset, includeSchedulers }) => {
+      const orgId = organizationId(orgOverride);
+      const opts = { targetId, limit, offset, includeSchedulers };
+
+      // ── Workflow step 1: explicit environmentId provided ──────────────────
+      if (envOverride) {
+        const deployments = await fetchDeploymentsForEnv(orgId, envOverride, envOverride, "", opts);
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Found ${deployments.length} deployment(s) in environment ${envOverride}.`,
+          }],
+        };
+      }
+
+      // ── Workflow step 2: environmentName provided — resolve to ID ─────────
+      if (environmentName) {
+        const envs = await fetchEnvironments(orgId);
+        const matched = envs.find(
+          (e) => e.name.toLowerCase() === environmentName.toLowerCase(),
+        );
+        if (!matched) {
+          const available = envs.map((e) => `"${e.name}"`).join(", ");
+          return {
+            content: [{
+              type: "text" as const,
+              text: `No environment found matching "${environmentName}". Available environments: ${available || "(none found)"}`,
+            }],
+            isError: true,
+          };
+        }
+        const deployments = await fetchDeploymentsForEnv(orgId, matched.id, matched.name, matched.type, opts);
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Found ${deployments.length} deployment(s) in environment "${matched.name}" (${matched.id}).`,
+          }],
+        };
+      }
+
+      // ── Workflow step 3: no env specified — fetch from all environments ───
+      const envs = await fetchEnvironments(orgId);
+      const perEnvResults = await Promise.all(
+        envs.map((env) => fetchDeploymentsForEnv(orgId, env.id, env.name, env.type, opts)),
+      );
+      const allDeployments = perEnvResults.flat();
+      const perEnvSummary = envs
+        .map((env, i) => `${env.name} (${perEnvResults[i]!.length})`)
+        .join(", ");
+      return {
+        content: [{
+          type: "text" as const,
+          text:
+            `Found ${allDeployments.length} deployment(s) across ${envs.length} environment(s): ${perEnvSummary || "(no environments)"}`,
+        }],
+      };
+    },
   );
+
+  // ── Detail ─────────────────────────────────────────────────────────────────
 
   server.registerTool(
     "runtime_get_deployment",
     {
-      title: "Get runtime deployment",
-      description: "Get details for one Runtime Manager application deployment.",
+      title: "Runtime Manager: Get Deployment Config",
+      description:
+        "Get full configuration for one Runtime Manager deployment — properties, environment variables, specs, and target config. Call runtime_list_deployments first to obtain the deploymentId.",
       inputSchema: deploymentInput,
       annotations: { readOnlyHint: true },
     },
-    async ({ organizationId: orgOverride, environmentId: envOverride, deploymentId }) =>
-      toolResult(await anypointRequest(deploymentPath(organizationId(orgOverride), environmentId(envOverride), deploymentId))),
-  );
-
-  server.registerTool(
-    "runtime_create_deployment",
-    {
-      title: "Create runtime deployment",
-      description: "Create a Runtime Manager application deployment. The body follows the AMC Application Manager API schema.",
-      inputSchema: {
-        ...runtimeScopeInput,
-        body: z.record(z.string(), z.unknown()),
-      },
+    async ({ organizationId: orgOverride, environmentId: envOverride, deploymentId }) => {
+      const orgId = organizationId(orgOverride);
+      const envId = environmentId(envOverride);
+      const [detail, specs] = await Promise.all([
+        anypointRequest(deploymentPath(orgId, envId, deploymentId)),
+        anypointRequest(specsPath(orgId, envId, deploymentId)).catch(() => null),
+      ]);
+      return toolResult({ deployment: detail, specs });
     },
-    async ({ organizationId: orgOverride, environmentId: envOverride, body }) =>
-      toolResult(await anypointRequest(deploymentsPath(organizationId(orgOverride), environmentId(envOverride)), { method: "POST", body: body as JsonValue })),
   );
 
   server.registerTool(
-    "runtime_update_deployment",
+    "runtime_get_logs",
     {
-      title: "Update runtime deployment",
-      description: "Patch a Runtime Manager application deployment. The body follows the AMC Application Manager API schema.",
+      title: "Runtime Manager: Get Application Logs",
+      description:
+        "Fetch logs for a Runtime Manager deployment. Call runtime_list_deployments first to obtain the deploymentId.",
       inputSchema: {
         ...deploymentInput,
-        body: z.record(z.string(), z.unknown()),
+        specId: z.string().optional().describe("Deployment spec ID. Auto-resolved from the first spec when omitted."),
+        size: z.number().int().positive().max(500).default(100),
+        offset: z.number().int().nonnegative().default(0),
+        descending: z.boolean().default(true),
+        startTime: z.string().optional(),
+        endTime: z.string().optional(),
       },
+      annotations: { readOnlyHint: true },
     },
-    async ({ organizationId: orgOverride, environmentId: envOverride, deploymentId, body }) =>
-      patchDeployment(orgOverride, envOverride, deploymentId, body as JsonValue),
+    async ({ organizationId: orgOverride, environmentId: envOverride, deploymentId, specId, size, offset, descending, startTime, endTime }) => {
+      const orgId = organizationId(orgOverride);
+      const envId = environmentId(envOverride);
+      const resolvedSpecId =
+        specId ?? firstSpecId(await anypointRequest(specsPath(orgId, envId, deploymentId)));
+      const logs = await anypointRequest(logsPath(orgId, envId, deploymentId, resolvedSpecId), {
+        query: { size, offset, descending, startTime, endTime },
+      });
+      return toolResult({ deploymentId, specId: resolvedSpecId, logs });
+    },
   );
+
+  // ── Actions ────────────────────────────────────────────────────────────────
 
   server.registerTool(
     "runtime_start_application",
     {
-      title: "Start Runtime Manager application",
-      description: "Start an application deployment in Runtime Manager.",
+      title: "Runtime Manager: Start Application",
+      description:
+        "Start a stopped Runtime Manager application. Call runtime_list_deployments first to obtain the deploymentId.",
       inputSchema: deploymentInput,
     },
     async ({ organizationId: orgOverride, environmentId: envOverride, deploymentId }) =>
-      runDeploymentAction("start", orgOverride, envOverride, deploymentId),
+      toolResult(await patchDesiredState(organizationId(orgOverride), environmentId(envOverride), deploymentId, "STARTED")),
   );
 
   server.registerTool(
     "runtime_stop_application",
     {
-      title: "Stop Runtime Manager application",
-      description: "Stop an application deployment in Runtime Manager.",
+      title: "Runtime Manager: Stop Application",
+      description:
+        "Stop a running Runtime Manager application. Call runtime_list_deployments first to obtain the deploymentId.",
       inputSchema: deploymentInput,
+      annotations: { destructiveHint: true },
     },
     async ({ organizationId: orgOverride, environmentId: envOverride, deploymentId }) =>
-      runDeploymentAction("stop", orgOverride, envOverride, deploymentId),
+      toolResult(await patchDesiredState(organizationId(orgOverride), environmentId(envOverride), deploymentId, "STOPPED")),
   );
 
   server.registerTool(
     "runtime_restart_application",
     {
-      title: "Restart Runtime Manager application",
-      description: "Restart an application deployment in Runtime Manager.",
+      title: "Runtime Manager: Restart Application",
+      description:
+        "Restart a Runtime Manager application (stop then start). Call runtime_list_deployments first to obtain the deploymentId.",
       inputSchema: deploymentInput,
     },
-    async ({ organizationId: orgOverride, environmentId: envOverride, deploymentId }) =>
-      runDeploymentAction("restart", orgOverride, envOverride, deploymentId),
+    async ({ organizationId: orgOverride, environmentId: envOverride, deploymentId }) => {
+      const orgId = organizationId(orgOverride);
+      const envId = environmentId(envOverride);
+      const stop = await patchDesiredState(orgId, envId, deploymentId, "STOPPED");
+      const start = await patchDesiredState(orgId, envId, deploymentId, "STARTED");
+      return toolResult({ stop, start });
+    },
   );
 
   server.registerTool(
-    "runtime_start_deployment",
+    "runtime_set_scheduler_state",
     {
-      title: "Start runtime deployment",
-      description: "Backward-compatible alias for runtime_start_application.",
-      inputSchema: deploymentInput,
+      title: "Runtime Manager: Enable/Disable Scheduler",
+      description:
+        "Enable or disable a specific scheduler on a Runtime Manager application. Scheduler names are visible in the runtime_list_deployments UI. Call runtime_list_deployments first to obtain the deploymentId and scheduler name.",
+      inputSchema: {
+        ...deploymentInput,
+        schedulerName: z.string().min(1).describe("Scheduler flow name as shown in runtime_list_deployments."),
+        enabled: z.boolean().describe("true to enable, false to disable the scheduler."),
+      },
     },
-    async ({ organizationId: orgOverride, environmentId: envOverride, deploymentId }) =>
-      runDeploymentAction("start", orgOverride, envOverride, deploymentId),
+    async ({ organizationId: orgOverride, environmentId: envOverride, deploymentId, schedulerName, enabled }) => {
+      const orgId = organizationId(orgOverride);
+      const envId = environmentId(envOverride);
+      const result = await anypointRequest(
+        `${schedulersPath(orgId, envId, deploymentId)}/${encodePathSegment(schedulerName)}`,
+        { method: "PATCH", body: { enabled } },
+      );
+      return toolResult(result);
+    },
+  );
+
+  // ── Advanced / Gated ───────────────────────────────────────────────────────
+
+  if (advancedToolsEnabled()) {
+  server.registerTool(
+    "runtime_create_deployment",
+    {
+      title: "Runtime Manager: Create Deployment [Advanced]",
+      description:
+        "Create a new Runtime Manager deployment. Requires ANYPOINT_MCP_ADVANCED_TOOLS=true. Body follows the AMC Application Manager API v2 schema.",
+      inputSchema: {
+        ...scopeInput,
+        body: z.record(z.string(), z.unknown()).describe("Full deployment request body."),
+      },
+    },
+    async ({ organizationId: orgOverride, environmentId: envOverride, body }) => {
+      requireAdvancedTools();
+      return toolResult(
+        await anypointRequest(deploymentsBase(organizationId(orgOverride), environmentId(envOverride)), {
+          method: "POST",
+          body: body as JsonValue,
+        }),
+      );
+    },
   );
 
   server.registerTool(
-    "runtime_stop_deployment",
+    "runtime_update_deployment",
     {
-      title: "Stop runtime deployment",
-      description: "Backward-compatible alias for runtime_stop_application.",
-      inputSchema: deploymentInput,
+      title: "Runtime Manager: Update Deployment [Advanced]",
+      description:
+        "Patch a Runtime Manager deployment configuration. Requires ANYPOINT_MCP_ADVANCED_TOOLS=true.",
+      inputSchema: {
+        ...deploymentInput,
+        body: z.record(z.string(), z.unknown()).describe("Partial deployment update body per AMC API PATCH schema."),
+      },
     },
-    async ({ organizationId: orgOverride, environmentId: envOverride, deploymentId }) =>
-      runDeploymentAction("stop", orgOverride, envOverride, deploymentId),
-  );
-
-  server.registerTool(
-    "runtime_restart_deployment",
-    {
-      title: "Restart runtime deployment",
-      description: "Backward-compatible alias for runtime_restart_application.",
-      inputSchema: deploymentInput,
-    },
-    async ({ organizationId: orgOverride, environmentId: envOverride, deploymentId }) =>
-      runDeploymentAction("restart", orgOverride, envOverride, deploymentId),
-  );
-
-  server.registerTool(
-    "runtime_delete_deployment",
-    {
-      title: "Delete runtime deployment",
-      description: "Delete a Runtime Manager application deployment.",
-      inputSchema: deploymentInput,
-      annotations: { destructiveHint: true },
-    },
-    async ({ organizationId: orgOverride, environmentId: envOverride, deploymentId }) =>
-      toolResult(await anypointRequest(deploymentPath(organizationId(orgOverride), environmentId(envOverride), deploymentId), { method: "DELETE" })),
-  );
-
-  server.registerTool(
-    "runtime_watch_logs",
-    {
-      title: "Watch runtime logs",
-      description: "Fetch recent Runtime Manager logs for a deployment spec. This is a bounded log read, not a long-running stream.",
-      inputSchema: runtimeLogsInput,
-      annotations: { readOnlyHint: true },
-    },
-    async ({ organizationId: orgOverride, environmentId: envOverride, deploymentId, specId, size, offset, descending, startTime, endTime }) =>
-      fetchRuntimeLogs(orgOverride, envOverride, deploymentId, specId, { size, offset, descending, startTime, endTime }),
-  );
-
-  server.registerTool(
-    "watch_runtime_logs",
-    {
-      title: "Watch runtime logs",
-      description: "Backward-compatible alias for runtime_watch_logs.",
-      inputSchema: runtimeLogsInput,
-      annotations: { readOnlyHint: true },
-    },
-    async ({ organizationId: orgOverride, environmentId: envOverride, deploymentId, specId, size, offset, descending, startTime, endTime }) =>
-      fetchRuntimeLogs(orgOverride, envOverride, deploymentId, specId, { size, offset, descending, startTime, endTime }),
-  );
-
-  server.registerTool(
-    "runtime_raw_request",
-    {
-      title: "Runtime Manager raw request",
-      description: "Call an AMC Application Manager path under /amc/application-manager/api. Use for documented endpoints not wrapped yet.",
-      inputSchema: rawRequestInput,
-    },
-    async ({ path, method, body }) => {
-      assertPathPrefix(path, ["/amc/application-manager/api"]);
-      return toolResult(await anypointRequest(path, { method, body: asJsonValue(body) }));
+    async ({ organizationId: orgOverride, environmentId: envOverride, deploymentId, body }) => {
+      requireAdvancedTools();
+      return toolResult(
+        await anypointRequest(
+          deploymentPath(organizationId(orgOverride), environmentId(envOverride), deploymentId),
+          { method: "PATCH", body: body as JsonValue },
+        ),
+      );
     },
   );
+  } // end advancedToolsEnabled
 }

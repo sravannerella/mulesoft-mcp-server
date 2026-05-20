@@ -1,408 +1,222 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerAppResource, registerAppTool } from "@modelcontextprotocol/ext-apps/server";
 import { createUIResource } from "@mcp-ui/server";
-import type { UIResource } from "@mcp-ui/server";
 import { z } from "zod/v4";
-import { anypointRequest, encodePathSegment } from "../shared/anypointClient.js";
+import { anypointRequest, encodePathSegment, organizationId } from "../shared/anypointClient.js";
 import { toolResult } from "../shared/mcpResponse.js";
-import type { AnypointModule } from "../shared/types.js";
+import type { JsonValue } from "../shared/types.js";
 import { renderDesignCenterProjectsUI } from "../ui/designCenterUiRenderer.js";
-import { registerEndpointResource } from "./resources.js";
 
-type SaveFile = {
-  path: string;
-  type: "FILE" | "FOLDER";
-  content?: string;
-  title?: string;
-};
+const PROJECTS_URI = "ui://anypoint-api-designer/projects" as const;
 
-type DesignCenterProject = {
-  id?: string;
-  name?: string;
-  classifier?: string;
-  type?: string;
-  createdDate?: string | number;
-  lastUpdatedDate?: string | number;
-  updatedDate?: string | number;
-  deleted?: boolean;
-  [key: string]: unknown;
-};
+// ─── Path helpers ─────────────────────────────────────────────────────────────
 
-const apiDesignerModule: AnypointModule = {
-  name: "api-designer",
-  displayName: "API Designer Experience API",
-  resourceUri: "anypoint-api-designer://endpoints",
-  docsUrl: "https://dev-portal.mulesoft.com/apis/api-designer-experience.html",
-  endpoints: [
-    "GET /designcenter/api-designer/projects",
-    "POST /designcenter/api-designer/projects",
-    "GET /designcenter/api-designer/projects/{projectId}",
-    "DELETE /designcenter/api-designer/projects/{projectId}",
-    "GET /designcenter/api-designer/projects/{projectId}/branches",
-    "POST /designcenter/api-designer/projects/{projectId}/branches",
-    "GET /designcenter/api-designer/projects/{projectId}/branches/{branch}/files",
-    "GET /designcenter/api-designer/projects/{projectId}/branches/{branch}/files/{filePath}",
-    "POST /designcenter/api-designer/projects/{projectId}/branches/{branch}/acquireLock",
-    "POST /designcenter/api-designer/projects/{projectId}/branches/{branch}/status",
-    "POST /designcenter/api-designer/projects/{projectId}/branches/{branch}/releaseLock",
-    "POST /designcenter/api-designer/projects/{projectId}/branches/{branch}/save",
-    "POST /designcenter/api-designer/projects/{projectId}/branches/{branch}/files/{filePath}/move",
-    "DELETE /designcenter/api-designer/projects/{projectId}/branches/{branch}/files/{filePath}",
-    "POST /designcenter/api-designer/projects/{projectId}/branches/{branch}/publish/exchange",
-  ],
-};
-
-function projectPath(projectId = ""): string {
+function projectPath(projectId?: string): string {
   const suffix = projectId ? `/${encodePathSegment(projectId)}` : "";
   return `/designcenter/api-designer/projects${suffix}`;
 }
 
-function branchPath(projectId: string, branch = ""): string {
-  const suffix = branch ? `/${encodePathSegment(branch)}` : "";
-  return `${projectPath(projectId)}/branches${suffix}`;
+function branchPath(projectId: string, branch: string): string {
+  return `${projectPath(projectId)}/branches/${encodePathSegment(branch)}`;
 }
 
+// ─── Input schemas ────────────────────────────────────────────────────────────
+
 const branchInput = {
-  projectId: z.string().min(1).describe("Anypoint API Designer project ID."),
+  projectId: z.string().min(1).describe("API Designer project ID. Obtain from design_center_list_projects."),
   branch: z.string().min(1).default("master").describe("Branch name. Defaults to master."),
 };
 
-const filePathInput = {
-  ...branchInput,
-  path: z.string().min(1).describe("File or folder path inside the branch, for example api.raml."),
-};
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const PROJECTS_UI_URI = "ui://anypoint-api-designer/projects" as const;
-
-const projectsUiResource = {
-  uri: PROJECTS_UI_URI,
-  name: "Design Center Projects",
-  description: "Visual HTML view of API Designer projects.",
-};
-
-const projectsUiCsp = {
-  connectDomains: [],
-  resourceDomains: ["https://fonts.googleapis.com", "https://fonts.gstatic.com"],
-  frameDomains: [],
-  baseUriDomains: [],
-};
-
-export async function renderApiDesignerProjectsHtml(): Promise<string> {
-  return renderDesignCenterProjectsUI(await anypointRequest(projectPath()));
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-async function createProjectsUiResource(): Promise<UIResource> {
-  return createUIResource({
-    uri: PROJECTS_UI_URI,
-    content: {
-      type: "rawHtml",
-      htmlString: await renderApiDesignerProjectsHtml(),
-    },
-    encoding: "text",
-    metadata: {
-      title: projectsUiResource.name,
-      description: projectsUiResource.description,
-      "mcpui.dev/ui-connect-domains": projectsUiCsp.connectDomains,
-      "mcpui.dev/ui-resource-domains": projectsUiCsp.resourceDomains,
-      "mcpui.dev/ui-frame-domains": projectsUiCsp.frameDomains,
-      "mcpui.dev/ui-baseUri-domains": projectsUiCsp.baseUriDomains,
-    },
-    uiMetadata: {
-      "preferred-frame-size": ["900px", "640px"],
-    },
-  });
-}
-
-function publicProjectsUiUrl(): string | undefined {
-  const baseUrl = process.env.MCP_PUBLIC_BASE_URL ?? process.env.PUBLIC_BASE_URL;
-  if (!baseUrl) {
-    return undefined;
-  }
-
-  return `${baseUrl.replace(/\/+$/, "")}/ui/api-designer/projects`;
-}
-
-function normalizeProjects(data: unknown): DesignCenterProject[] {
-  if (Array.isArray(data)) {
-    return data as DesignCenterProject[];
-  }
-
-  if (data && typeof data === "object") {
-    const record = data as Record<string, unknown>;
+function normalizeProjects(data: unknown): unknown[] {
+  if (Array.isArray(data)) return data;
+  if (isRecord(data)) {
     for (const key of ["projects", "items", "data", "results"]) {
-      if (Array.isArray(record[key])) {
-        return record[key] as DesignCenterProject[];
-      }
+      if (Array.isArray(data[key])) return data[key] as unknown[];
     }
   }
-
   return [];
 }
 
-function projectSummary(data: unknown, publicUrl: string | undefined) {
-  const projects = normalizeProjects(data);
-  const activeProjects = projects.filter((project) => project.deleted !== true);
-  const names = activeProjects.map((project) => project.name ?? project.id ?? "Untitled Project");
-  const summary = [
-    `Design Center has ${activeProjects.length} active project${activeProjects.length === 1 ? "" : "s"}.`,
-    names.length > 0 ? `Projects: ${names.join(", ")}.` : undefined,
-    publicUrl ? `Visual view: ${publicUrl}` : undefined,
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  return {
-    content: [
-      {
-        type: "text" as const,
-        text: summary,
-      },
-    ],
-    structuredContent: {
-      count: activeProjects.length,
-      projects: activeProjects.map((project) => ({
-        id: project.id,
-        name: project.name,
-        type: project.type ?? project.classifier,
-        createdDate: project.createdDate,
-        updatedDate: project.updatedDate ?? project.lastUpdatedDate,
-      })),
-      visualViewUrl: publicUrl,
-    },
-  };
+function projectsSummary(projects: unknown[]): string {
+  const names = projects.map((p) =>
+    isRecord(p) ? String(p.name ?? p.id ?? "Untitled") : "Untitled",
+  );
+  return `Found ${projects.length} project(s): ${names.join(", ")}.`;
 }
 
+// ─── Tool registration ────────────────────────────────────────────────────────
+
 export function registerApiDesignerTools(server: McpServer): void {
-  registerEndpointResource(server, apiDesignerModule);
+  // ── Discovery ──────────────────────────────────────────────────────────────
 
   registerAppResource(
     server,
-    projectsUiResource.name,
-    PROJECTS_UI_URI,
-    {
-      description: "Visual HTML view of API Designer projects. Renders as a carousel for fewer than 5 projects, or a table for 5 or more.",
-      _meta: {
-        ui: {
-          csp: projectsUiCsp,
-        },
-      },
-    },
+    "Design Center Projects",
+    PROJECTS_URI,
+    { description: "Visual card carousel of all API Designer projects." },
     async () => {
-      const uiResource = await createProjectsUiResource();
-      return {
-        contents: [
-          {
-            ...uiResource.resource,
-            _meta: {
-              ...uiResource.resource._meta,
-              ui: {
-                csp: projectsUiCsp,
-              },
-            },
-          },
-        ],
-      };
+      const data = await anypointRequest(projectPath());
+      const projects = normalizeProjects(data);
+      const html = renderDesignCenterProjectsUI(projects);
+      const resource = createUIResource({
+        uri: PROJECTS_URI,
+        content: { type: "rawHtml", htmlString: html },
+        encoding: "text",
+      });
+      return { contents: [resource.resource] };
     },
   );
 
   registerAppTool(
     server,
-    "api_designer_list_projects",
+    "design_center_list_projects",
     {
-      title: "List API Designer projects",
-      description: "List API Designer projects the configured user can access.",
+      title: "Design Center: List Projects",
+      description:
+        "List all API Designer projects accessible to the configured user. Returns a visual card carousel. Use the projectId from this result with other design_center_* tools.",
+      inputSchema: {},
       annotations: { readOnlyHint: true },
-      _meta: {
-        ui: { resourceUri: PROJECTS_UI_URI },
-      },
+      _meta: { ui: { resourceUri: PROJECTS_URI } },
     },
     async () => {
       const data = await anypointRequest(projectPath());
-      const publicUrl = publicProjectsUiUrl();
-      return projectSummary(data, publicUrl);
+      const projects = normalizeProjects(data);
+      return {
+        content: [{ type: "text" as const, text: projectsSummary(projects) }],
+      };
     },
   );
 
+  // ── Detail ─────────────────────────────────────────────────────────────────
+
   server.registerTool(
-    "api_designer_create_project",
+    "design_center_get_project",
     {
-      title: "Create API Designer project",
-      description: "Create an API specification or RAML fragment project.",
+      title: "Design Center: Get Project Details",
+      description:
+        "Get a single API Designer project including its branches and the file tree of the specified branch in one call. Call design_center_list_projects first to obtain the projectId.",
       inputSchema: {
-        name: z.string().min(1),
-        classifier: z.enum(["raml", "raml-fragment"]).default("raml"),
-        subType: z.string().optional().describe("Fragment subtype, such as trait or data-type."),
+        projectId: z.string().min(1).describe("Project ID from design_center_list_projects."),
+        branch: z.string().min(1).default("master").describe("Branch to inspect."),
       },
-    },
-    async ({ name, classifier, subType }) =>
-      toolResult(await anypointRequest(projectPath(), { method: "POST", body: { name, classifier, ...(subType ? { subType } : {}) } })),
-  );
-
-  server.registerTool(
-    "api_designer_get_project",
-    {
-      title: "Get API Designer project",
-      description: "Get details for one API Designer project.",
-      inputSchema: { projectId: z.string().min(1) },
       annotations: { readOnlyHint: true },
     },
-    async ({ projectId }) => toolResult(await anypointRequest(projectPath(projectId))),
-  );
-
-  server.registerTool(
-    "api_designer_delete_project",
-    {
-      title: "Delete API Designer project",
-      description: "Delete an API Designer project.",
-      inputSchema: { projectId: z.string().min(1) },
-      annotations: { destructiveHint: true },
+    async ({ projectId, branch }) => {
+      const [project, branches, files] = await Promise.all([
+        anypointRequest(projectPath(projectId)),
+        anypointRequest(`${projectPath(projectId)}/branches`),
+        anypointRequest(`${branchPath(projectId, branch)}/files`),
+      ]);
+      return toolResult({ project, branches, files });
     },
-    async ({ projectId }) => toolResult(await anypointRequest(projectPath(projectId), { method: "DELETE" })),
   );
 
   server.registerTool(
-    "api_designer_list_branches",
+    "design_center_read_file",
     {
-      title: "List API Designer branches",
-      description: "List branches in an API Designer project.",
-      inputSchema: { projectId: z.string().min(1) },
-      annotations: { readOnlyHint: true },
-    },
-    async ({ projectId }) => toolResult(await anypointRequest(branchPath(projectId))),
-  );
-
-  server.registerTool(
-    "api_designer_create_branch",
-    {
-      title: "Create API Designer branch",
-      description: "Create a branch. If commitId is omitted, Anypoint branches from master.",
-      inputSchema: {
-        projectId: z.string().min(1),
-        name: z.string().min(1),
-        commitId: z.string().optional(),
-      },
-    },
-    async ({ projectId, name, commitId }) =>
-      toolResult(await anypointRequest(branchPath(projectId), { method: "POST", body: { name, ...(commitId ? { commitId } : {}) } })),
-  );
-
-  server.registerTool(
-    "api_designer_list_files",
-    {
-      title: "List API Designer files",
-      description: "List files and folders in a project branch.",
-      inputSchema: branchInput,
-      annotations: { readOnlyHint: true },
-    },
-    async ({ projectId, branch }) => toolResult(await anypointRequest(`${branchPath(projectId, branch)}/files`)),
-  );
-
-  server.registerTool(
-    "api_designer_read_file",
-    {
-      title: "Read API Designer file",
-      description: "Read a file from a project branch.",
-      inputSchema: filePathInput,
-      annotations: { readOnlyHint: true },
-    },
-    async ({ projectId, branch, path }) =>
-      toolResult(await anypointRequest(`${branchPath(projectId, branch)}/files/${encodePathSegment(path)}`, { accept: "*/*" })),
-  );
-
-  server.registerTool(
-    "api_designer_acquire_lock",
-    {
-      title: "Acquire API Designer lock",
-      description: "Acquire the write lock for a branch before file changes.",
-      inputSchema: branchInput,
-    },
-    async ({ projectId, branch }) => toolResult(await anypointRequest(`${branchPath(projectId, branch)}/acquireLock`, { method: "POST", body: {} })),
-  );
-
-  server.registerTool(
-    "api_designer_branch_status",
-    {
-      title: "API Designer branch status",
-      description: "Read branch write-lock status and keep the lock alive.",
-      inputSchema: branchInput,
-    },
-    async ({ projectId, branch }) => toolResult(await anypointRequest(`${branchPath(projectId, branch)}/status`, { method: "POST", body: {} })),
-  );
-
-  server.registerTool(
-    "api_designer_release_lock",
-    {
-      title: "Release API Designer lock",
-      description: "Release the write lock for a branch.",
-      inputSchema: branchInput,
-    },
-    async ({ projectId, branch }) => toolResult(await anypointRequest(`${branchPath(projectId, branch)}/releaseLock`, { method: "POST", body: {} })),
-  );
-
-  server.registerTool(
-    "api_designer_save_files",
-    {
-      title: "Save API Designer files",
-      description: "Create or update one or more files in a branch. Acquire the branch lock first.",
+      title: "Design Center: Read File",
+      description:
+        "Read the content of a file from a Design Center project branch. Call design_center_get_project first to browse the file tree.",
       inputSchema: {
         ...branchInput,
-        files: z.array(
-          z.object({
-            path: z.string().min(1),
-            type: z.enum(["FILE", "FOLDER"]).default("FILE"),
-            content: z.string().optional(),
-            title: z.string().optional(),
-          }),
-        ).min(1),
+        path: z.string().min(1).describe("File path inside the branch, e.g. api.raml."),
       },
+      annotations: { readOnlyHint: true },
     },
-    async ({ projectId, branch, files }) =>
-      toolResult(await anypointRequest(`${branchPath(projectId, branch)}/save`, { method: "POST", body: files as SaveFile[] })),
+    async ({ projectId, branch, path }) => {
+      const content = await anypointRequest(
+        `${branchPath(projectId, branch)}/files/${encodePathSegment(path)}`,
+        { accept: "*/*" },
+      );
+      return toolResult(content);
+    },
   );
 
-  server.registerTool(
-    "api_designer_move_file",
-    {
-      title: "Move API Designer file",
-      description: "Move or rename a file or folder in a branch.",
-      inputSchema: {
-        ...filePathInput,
-        newPath: z.string().min(1).describe("Destination path inside the branch."),
-      },
-    },
-    async ({ projectId, branch, path, newPath }) =>
-      toolResult(await anypointRequest(`${branchPath(projectId, branch)}/files/${encodePathSegment(path)}/move`, { method: "POST", body: { path: newPath } })),
-  );
+  // ── Actions ────────────────────────────────────────────────────────────────
 
   server.registerTool(
-    "api_designer_delete_file",
+    "design_center_edit_file",
     {
-      title: "Delete API Designer file",
-      description: "Delete a file or folder in a branch.",
-      inputSchema: filePathInput,
-      annotations: { destructiveHint: true },
-    },
-    async ({ projectId, branch, path }) =>
-      toolResult(await anypointRequest(`${branchPath(projectId, branch)}/files/${encodePathSegment(path)}`, { method: "DELETE" })),
-  );
-
-  server.registerTool(
-    "api_designer_publish_exchange",
-    {
-      title: "Publish API Designer project to Exchange",
-      description: "Publish a branch to Anypoint Exchange.",
+      title: "Design Center: Edit File",
+      description:
+        "Atomically edit one or more files in a Design Center project branch (acquires lock → saves files → releases lock). On error the lock is always released. Call design_center_get_project first to confirm the file tree.",
       inputSchema: {
         ...branchInput,
-        name: z.string().min(1),
-        apiVersion: z.string().min(1),
-        version: z.string().min(1),
-        main: z.string().min(1).describe("Main API file, for example api.raml."),
-        assetId: z.string().min(1),
-        groupId: z.string().min(1),
-        classifier: z.enum(["raml", "raml-fragment"]).default("raml"),
+        files: z
+          .array(
+            z.object({
+              path: z.string().min(1).describe("File path inside the branch, e.g. api.raml."),
+              type: z.enum(["FILE", "FOLDER"]).default("FILE"),
+              content: z.string().optional().describe("File content (UTF-8)."),
+              title: z.string().optional(),
+            }),
+          )
+          .min(1)
+          .describe("Files to create or update."),
       },
     },
-    async ({ projectId, branch, ...publishRequest }) =>
-      toolResult(await anypointRequest(`${branchPath(projectId, branch)}/publish/exchange`, { method: "POST", body: publishRequest })),
+    async ({ projectId, branch, files }) => {
+      const lockPath = `${branchPath(projectId, branch)}/acquireLock`;
+      const savePath = `${branchPath(projectId, branch)}/save`;
+      const unlockPath = `${branchPath(projectId, branch)}/releaseLock`;
+
+      // 1. Acquire lock
+      await anypointRequest(lockPath, { method: "POST", body: {} });
+
+      // 2. Save files — release lock even if this throws
+      let saveResult: unknown;
+      try {
+        saveResult = await anypointRequest(savePath, {
+          method: "POST",
+          body: files as JsonValue,
+        });
+      } finally {
+        // 3. Release lock (best-effort; ignore errors here)
+        await anypointRequest(unlockPath, { method: "POST", body: {} }).catch(() => undefined);
+      }
+
+      return toolResult(saveResult);
+    },
+  );
+
+  server.registerTool(
+    "design_center_publish_to_exchange",
+    {
+      title: "Design Center: Publish to Exchange",
+      description:
+        "Publish an API Designer project branch to Anypoint Exchange. Call design_center_get_project first to confirm the project and branch.",
+      inputSchema: {
+        ...branchInput,
+        name: z.string().min(1).describe("Exchange asset display name."),
+        apiVersion: z.string().min(1).describe("API version string, e.g. v1."),
+        version: z.string().min(1).describe("Asset version, e.g. 1.0.0."),
+        main: z.string().min(1).describe("Main API file inside the branch, e.g. api.raml."),
+        assetId: z.string().min(1).describe("Exchange asset ID."),
+        groupId: z
+          .string()
+          .optional()
+          .describe("Exchange group ID. Defaults to the configured organization ID."),
+        classifier: z
+          .enum(["raml", "raml-fragment", "oas", "asyncapi"])
+          .default("raml")
+          .describe("Asset classifier."),
+        tags: z.array(z.string()).optional().describe("Exchange tags to apply."),
+      },
+    },
+    async ({ projectId, branch, groupId, ...rest }) => {
+      const resolvedGroupId = groupId ?? organizationId();
+      return toolResult(
+        await anypointRequest(`${branchPath(projectId, branch)}/publish/exchange`, {
+          method: "POST",
+          body: { groupId: resolvedGroupId, ...rest } as JsonValue,
+        }),
+      );
+    },
   );
 }
