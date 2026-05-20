@@ -38,6 +38,31 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+interface EnvInfo { id: string; name: string; type: string; }
+
+async function fetchMqEnvironments(orgId: string): Promise<EnvInfo[]> {
+  const raw = await anypointRequest(`/accounts/api/organizations/${encodePathSegment(orgId)}/environments`);
+  const list = Array.isArray(raw) ? raw : isRecord(raw) && Array.isArray(raw.data) ? raw.data : [];
+  return (list as unknown[])
+    .filter(isRecord)
+    .map((e) => ({ id: String(e["id"] ?? ""), name: String(e["name"] ?? ""), type: String(e["type"] ?? "").toLowerCase() }))
+    .filter((e) => e.id.length > 0);
+}
+
+async function resolveSandboxEnv(orgId: string): Promise<EnvInfo> {
+  try {
+    const envs = await fetchMqEnvironments(orgId);
+    return (
+      envs.find((e) => e.type === "sandbox") ??
+      envs.find((e) => e.name.toLowerCase().includes("sandbox") || e.name.toLowerCase().includes("sbx") || e.name.toLowerCase().includes("dev")) ??
+      envs[0] ??
+      { id: environmentId(), name: environmentId(), type: "" }
+    );
+  } catch {
+    return { id: environmentId(), name: environmentId(), type: "" };
+  }
+}
+
 const scopeInput = {
   ...optionalOrgId,
   ...optionalEnvId,
@@ -59,7 +84,9 @@ export function registerMqTools(server: McpServer): void {
     { description: "Visual table of Anypoint MQ queues with stats, DLQ status, and TTLs." },
     async () => {
       const orgId = organizationId();
-      const envId = environmentId();
+      const sandboxEnv = await resolveSandboxEnv(orgId);
+      const envId = sandboxEnv.id;
+      const envLabel = sandboxEnv.name;
       const region = "us-east-1";
       const [queuesRaw, statsRaw] = await Promise.all([
         anypointRequest(queuesPath(orgId, envId, region), { query: { limit: 25, offset: 0 } }),
@@ -82,7 +109,7 @@ export function registerMqTools(server: McpServer): void {
         const stats = statsMap.get(qId);
         return stats ? { ...q, stats } : q;
       });
-      const html = renderMqQueuesHtml(enriched, envId);
+      const html = renderMqQueuesHtml(enriched, envLabel);
       const resource = createUIResource({
         uri: MQ_QUEUES_URI,
         content: { type: "rawHtml", htmlString: html },
@@ -101,15 +128,39 @@ export function registerMqTools(server: McpServer): void {
         "List Anypoint MQ queues in an environment region. Returns a UI showing message counts, DLQ status, encryption, and TTLs. Use the queueId from this result with mq_send_message or mq_purge_queue.",
       inputSchema: {
         ...scopeInput,
+        environmentName: z.string().optional().describe(
+          "Environment name (case-insensitive). Resolved to ID automatically. When omitted, defaults to the Sandbox environment.",
+        ),
         limit: z.number().int().positive().max(200).default(25),
         offset: z.number().int().nonnegative().default(0),
       },
       annotations: { readOnlyHint: true },
       _meta: { ui: { resourceUri: MQ_QUEUES_URI } },
     },
-    async ({ organizationId: orgOverride, environmentId: envOverride, region, limit, offset }) => {
+    async ({ organizationId: orgOverride, environmentId: envOverride, environmentName, region, limit, offset }) => {
       const orgId = organizationId(orgOverride);
-      const envId = environmentId(envOverride);
+      let envId: string;
+      let envLabel: string;
+      if (envOverride) {
+        envId = envOverride;
+        envLabel = envOverride;
+      } else if (environmentName) {
+        const envs = await fetchMqEnvironments(orgId);
+        const matched = envs.find((e) => e.name.toLowerCase() === environmentName.toLowerCase());
+        if (!matched) {
+          const available = envs.map((e) => `"${e.name}"`).join(", ");
+          return {
+            content: [{ type: "text" as const, text: `No environment found matching "${environmentName}". Available: ${available || "(none)"}` }],
+            isError: true,
+          };
+        }
+        envId = matched.id;
+        envLabel = matched.name;
+      } else {
+        const sandbox = await resolveSandboxEnv(orgId);
+        envId = sandbox.id;
+        envLabel = sandbox.name;
+      }
       const queuesRaw = await anypointRequest(queuesPath(orgId, envId, region), { query: { limit, offset } });
       const queues: unknown[] = Array.isArray(queuesRaw)
         ? queuesRaw
@@ -117,7 +168,7 @@ export function registerMqTools(server: McpServer): void {
           ? queuesRaw.queues
           : [];
       return {
-        content: [{ type: "text" as const, text: `Found ${queues.length} MQ queue(s) in region ${region}.` }],
+        content: [{ type: "text" as const, text: `Found ${queues.length} MQ queue(s) in "${envLabel}" (region: ${region}).` }],
       };
     },
   );

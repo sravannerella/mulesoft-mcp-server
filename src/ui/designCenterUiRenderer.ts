@@ -212,11 +212,18 @@ const SHARED_STYLES = `
       color: #65645d;
       font-size: 13px;
     }
+    /* Search */
+    .dc-search-wrap { position: relative; margin-bottom: 14px; }
+    .dc-search-wrap svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: #aaa; pointer-events: none; }
+    .dc-search { width: 100%; max-width: 340px; padding: 8px 12px 8px 34px; border: 1px solid #d8d6d0; border-radius: 10px; font-size: 13px; font-family: inherit; background: #fff; color: #242424; outline: none; }
+    .dc-search:focus { border-color: #D97757; box-shadow: 0 0 0 2px rgba(217,119,87,0.15); }
+    .dc-no-results { color: #aaa; font-size: 13px; padding: 8px 2px; display: none; }
     @media (max-width: 520px) {
       body { padding: 12px; }
       .dc-card { flex-basis: 206px; height: 154px; }
       .dc-card-title { font-size: 17px; }
       .dc-card-meta { font-size: 12px; }
+      .dc-search { max-width: 100%; }
     }
   </style>
 `;
@@ -239,7 +246,7 @@ function buildCard(project: DesignCenterProject): string {
   const updated = formatDate(project.updatedDate ?? project.lastUpdatedDate);
   const url = openUrl(project);
   return `
-    <a class="dc-card" href="${escAttr(url)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escAttr(title)} in Design Center">
+    <a class="dc-card" href="${escAttr(url)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escAttr(title)} in Design Center" data-name="${escAttr(title.toLowerCase())}">
       <div class="dc-card-visual">
         ${MULEY_ICON_SRC ? `<img class="dc-card-icon" src="${MULEY_ICON_SRC}" alt="">` : `<span class="dc-card-icon"></span>`}
         <span class="dc-badge">${escHtml(badge)}</span>
@@ -261,12 +268,32 @@ function renderCarousel(projects: DesignCenterProject[]): string {
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">${SHARED_STYLES}</head>
 <body>
   <main class="dc-shell">
+    <div class="dc-search-wrap">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="search" class="dc-search" id="dc-srch" placeholder="Search projects\u2026" oninput="__dcFilter()">
+    </div>
+    <div class="dc-no-results" id="dc-nr">No projects match your search.</div>
     <div class="carousel-wrapper">
       <div class="carousel-track-outer">
         <div class="carousel-track" id="track">${cards}</div>
       </div>
     </div>
   </main>
+  <script>
+  function __dcFilter(){
+    var q=(document.getElementById('dc-srch').value||'').toLowerCase().trim();
+    var cards=document.querySelectorAll('.dc-card');
+    var vis=0;
+    cards.forEach(function(c){
+      var nm=(c.dataset.name||'').toLowerCase();
+      var show=!q||nm.includes(q);
+      c.style.display=show?'':'none';
+      if(show)vis++;
+    });
+    var nr=document.getElementById('dc-nr');
+    if(nr)nr.style.display=(vis===0&&q)?'block':'none';
+  }
+  </script>
   ${MCP_UI_READY_SCRIPT}
 </body>
 </html>`;

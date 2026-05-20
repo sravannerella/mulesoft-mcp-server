@@ -123,7 +123,7 @@ export function renderAccountsContextHtml(profile: unknown, environments: unknow
 
   const footerSection = envList.length > 0 ? `
     <div style="padding:20px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-      <span class="label" style="font-size:14px;font-weight:600">Environments</span>
+      <span class="label" style="font-size:14px;font-weight:600">Available Environments:</span>
       ${envChipsHtml}
     </div>` : "";
 
