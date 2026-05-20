@@ -2,6 +2,10 @@
 
 An MCP (Model Context Protocol) server for MuleSoft **Anypoint Platform** — lets AI assistants like Claude talk directly to your Anypoint APIs.
 
+## 🎬 Demo
+
+[![Anypoint MCP Server Demo](https://img.youtube.com/vi/7_GBy0tVXWA/maxresdefault.jpg)](https://youtu.be/7_GBy0tVXWA)
+
 ---
 
 ## ✨ Features
